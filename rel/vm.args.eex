@@ -1,0 +1,2 @@
+-kernel prevent_overlapping_partitions false
+-kernel net_ticktime 20
