@@ -18,9 +18,9 @@ defmodule WPS.RateLimiter do
   end
 
   def inc(tab \\ @table_name, key, limit_per_minute) do
-    with true <- get_count(tab, key) < limit_per_minute,
+    with true <- get_count(tab, key) <= limit_per_minute,
          new_count = :ets.update_counter(tab, key, 1, {key, 0}),
-         true <- new_count < limit_per_minute do
+         true <- new_count <= limit_per_minute do
       {:ok, new_count}
     else
       _ -> {:error, :rate_limited}

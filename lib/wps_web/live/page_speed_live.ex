@@ -4,7 +4,8 @@ defmodule WPSWeb.PageSpeedLive do
 
   alias WPS.Browser
 
-  @max_req_per_minute_per_host 2
+  @max_req_per_min_per_host 20
+  @max_all_req_per_min 1
   @browser_timeout 15_000
 
   def render(assigns) do
@@ -299,9 +300,12 @@ defmodule WPSWeb.PageSpeedLive do
          {:error, _} <- :inet.parse_address(uri.host),
          # Ensure there's a TLD
          true <- Regex.match?(~r/\.[a-zA-Z]{2,}$/, uri.host) do
-      case WPS.RateLimiter.inc(uri.host, @max_req_per_minute_per_host) do
-        {:ok, _new_count} -> {:ok, uri}
-        {:error, reason} -> {:error, reason}
+      # apply rate limites
+      with {:ok, _} <- WPS.RateLimiter.inc(uri.host, @max_req_per_min_per_host),
+           {:ok, _} <- WPS.RateLimiter.inc(:all_hosts, @max_all_req_per_min) do
+        {:ok, uri}
+      else
+        {:error, :rate_limited} -> {:error, :rate_limited}
       end
     else
       _ -> {:error, :invalid_url}
