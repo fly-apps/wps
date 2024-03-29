@@ -4,8 +4,8 @@ defmodule WPSWeb.PageSpeedLive do
 
   alias WPS.Browser
 
-  @max_req_per_min_per_host 20
-  @max_all_req_per_min 1
+  @max_req_per_min_per_host 10
+  @max_all_req_per_min 100
   @browser_timeout 15_000
 
   def render(assigns) do
