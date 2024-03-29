@@ -18,6 +18,7 @@ defmodule WPS.Application do
         !parent && {Phoenix.PubSub, name: WPS.PubSub},
         !parent && {WPS.Tracker, name: WPS.Tracker, pubsub_server: WPS.PubSub},
         !parent && WPS.Members,
+        !parent && WPS.RateLimiter,
         # Start a worker by calling: WPS.Worker.start_link(arg)
         # {WPS.Worker, arg},
         # Start to serve requests, typically the last entry

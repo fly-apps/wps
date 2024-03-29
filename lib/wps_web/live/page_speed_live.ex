@@ -4,6 +4,9 @@ defmodule WPSWeb.PageSpeedLive do
 
   alias WPS.Browser
 
+  @max_req_per_minute_per_host 2
+  @browser_timeout 15_000
+
   def render(assigns) do
     ~H"""
     <div class={[
@@ -237,6 +240,9 @@ defmodule WPSWeb.PageSpeedLive do
            :erpc.multicall(nodes, fn -> safe_timed_nav(node_timings[node()], parent, ref) end)
          end)}
 
+      {:error, :rate_limited} ->
+        {:noreply, put_flash(socket, :error, "Too many requests, please try again later")}
+
       {:error, _} ->
         {:noreply, put_flash(socket, :error, "Please provide a valid URL")}
     end
@@ -293,13 +299,15 @@ defmodule WPSWeb.PageSpeedLive do
          {:error, _} <- :inet.parse_address(uri.host),
          # Ensure there's a TLD
          true <- Regex.match?(~r/\.[a-zA-Z]{2,}$/, uri.host) do
-      {:ok, uri}
+      case WPS.RateLimiter.inc(uri.host, @max_req_per_minute_per_host) do
+        {:ok, _new_count} -> {:ok, uri}
+        {:error, reason} -> {:error, reason}
+      end
     else
       _ -> {:error, :invalid_url}
     end
   end
 
-  @browser_timeout 15_000
   def safe_timed_nav(%Browser.Timing{} = timing, parent, ref) do
     FLAME.call(WPS.BrowserRunner, fn ->
       timing = %Browser.Timing{timing | status: :loading}
