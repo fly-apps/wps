@@ -8,8 +8,9 @@ defmodule WPS.Browser.HeadlessDriver do
 
   def init(_opts) do
     driver_path = System.get_env("CHROME_DRIVER_PATH") || "chromedriver"
+
     {:ok, _, driver} =
-      :exec.run_link("#{driver_path} --enable-chrome-logs --log-level=ALL", [stdout: :print, stderr: :print])
+      :exec.run_link("#{driver_path} --enable-chrome-logs --log-level=ALL", [])
 
     {:ok, %{driver: driver}}
   end

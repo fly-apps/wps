@@ -7,20 +7,32 @@ defmodule WPS.Application do
 
   @impl true
   def start(_type, _args) do
+    parent = FLAME.Parent.get()
+    local_backend? = FLAME.Backend.impl() == FLAME.LocalBackend
+
     children =
       [
         WPSWeb.Telemetry,
         # WPS.Repo,
-        {DNSCluster, query: Application.get_env(:wps, :dns_cluster_query) || :ignore},
-        {Phoenix.PubSub, name: WPS.PubSub},
-        {WPS.Tracker, name: WPS.Tracker, pubsub_server: WPS.PubSub},
-        WPS.Members,
+        !parent && {DNSCluster, query: Application.get_env(:wps, :dns_cluster_query) || :ignore},
+        !parent && {Phoenix.PubSub, name: WPS.PubSub},
+        !parent && {WPS.Tracker, name: WPS.Tracker, pubsub_server: WPS.PubSub},
+        !parent && WPS.Members,
         # Start a worker by calling: WPS.Worker.start_link(arg)
         # {WPS.Worker, arg},
         # Start to serve requests, typically the last entry
-        !System.get_env("SKIP_HEADLESS_DRIVER") && WPS.Browser.HeadlessDriver,
+        if(parent || local_backend?, do: WPS.Browser.HeadlessDriver),
+        !parent &&
+          {FLAME.Pool,
+           name: WPS.BrowserRunner,
+           min: 0,
+           max: 5,
+           max_concurrency: 20,
+           min_idle_shutdown_after: :timer.seconds(30),
+           idle_shutdown_after: :timer.seconds(30),
+           log: :info},
         {Task.Supervisor, name: WPS.TaskSup},
-        WPSWeb.Endpoint
+        !parent && WPSWeb.Endpoint
       ]
       |> Enum.filter(& &1)
 

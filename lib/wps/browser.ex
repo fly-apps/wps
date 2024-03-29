@@ -13,7 +13,8 @@ defmodule WPS.Browser do
 
     def dom_interactive_time(%__MODULE__{} = timing) do
       case timing.meta do
-        %{"domInteractive" => domint, "navigationStart" => start} when is_integer(domint) and is_integer(start) ->
+        %{"domInteractive" => domint, "navigationStart" => start}
+        when is_integer(domint) and is_integer(start) ->
           domint - start
 
         _ ->
@@ -52,6 +53,7 @@ defmodule WPS.Browser do
     }
   }
 
+  @max_retries 10
   def start_session(base_url \\ "http://127.0.0.1:9515") do
     config =
       base_url
@@ -60,12 +62,24 @@ defmodule WPS.Browser do
         http_client_options: [recv_timeout: 60_000, timeout: 60_000]
       )
 
+    start_session_with_retries(config, 0)
+  end
+
+  defp start_session_with_retries(config, retries) do
     case WebDriverClient.start_session(config, %{capabilities: @capabilities}) do
       {:ok, %WebDriverClient.Session{} = web_session} ->
         {:ok, %Browser{session: web_session}}
 
-      {:error, _} = error ->
-        error
+      {:error, %WebDriverClient.ConnectionError{reason: :econnrefused} = reason} ->
+        if retries < @max_retries do
+          Process.sleep(1000)
+          start_session_with_retries(config, retries + 1)
+        else
+          {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
