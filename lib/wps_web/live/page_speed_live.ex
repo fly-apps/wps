@@ -6,7 +6,7 @@ defmodule WPSWeb.PageSpeedLive do
 
   @max_req_per_min_per_host 10
   @max_all_req_per_min 100
-  @browser_timeout 15_000
+  @browser_timeout 30_000
 
   def render(assigns) do
     ~H"""
@@ -77,13 +77,16 @@ defmodule WPSWeb.PageSpeedLive do
                     <div class="h-3 w-3 rounded-full bg-current"></div>
                   </div>
                   <div
-                    :if={timing.status == :complete}
+                    :if={timing.status == :complete && timing.http_status == 200}
                     class="flex-none rounded-full p-1 text-green-400 bg-green-400/15"
                   >
                     <div class="h-3 w-3 rounded-full bg-current"></div>
                   </div>
                   <div
-                    :if={timing.status == :error}
+                    :if={
+                      (timing.status == :error || timing.status == :complete) &&
+                        timing.http_status != 200
+                    }
                     class="flex-none rounded-full p-1 text-rose-400 bg-rose-400/15"
                   >
                     <div class="h-3 w-3 rounded-full bg-current"></div>
@@ -95,7 +98,7 @@ defmodule WPSWeb.PageSpeedLive do
                         <.icon name="hero-paper-airplane" class="w-5 h-5" />
                       </span>
                       <span class="whitespace-nowrap font-normal text-gray-300">
-                        <%= @uri.host %>
+                        <%= URI.parse(timing.browser_url).host %>
                       </span>
                       <span class="absolute inset-0"></span>
                     </a>
@@ -115,6 +118,19 @@ defmodule WPSWeb.PageSpeedLive do
                     class="whitespace-nowrap"
                   >
                     DOM interactive <%= domint %>ms
+                  </p>
+                  <svg
+                    :if={timing.status == :complete}
+                    viewBox="0 0 2 2"
+                    class="h-0.5 w-0.5 flex-none fill-gray-300"
+                  >
+                    <circle cx="1" cy="1" r="1" />
+                  </svg>
+                  <p
+                    :if={timing.transfered_bytes > 0}
+                    class="whitespace-nowrap"
+                  >
+                    <%= transfered_size(timing) %>
                   </p>
                 </div>
               </div>
@@ -244,7 +260,7 @@ defmodule WPSWeb.PageSpeedLive do
       {:error, :rate_limited} ->
         {:noreply, put_flash(socket, :error, "Too many requests, please try again later")}
 
-      {:error, _} ->
+      {:error, _reason} ->
         {:noreply, put_flash(socket, :error, "Please provide a valid URL")}
     end
   end
@@ -266,55 +282,60 @@ defmodule WPSWeb.PageSpeedLive do
     {:noreply, socket}
   end
 
-  def handle_info({_ref, {:loading, %Browser.Timing{} = timing}}, socket) do
-    {:noreply, stream_insert(socket, :timings, timing)}
+  def handle_info({ref, {:loading, %Browser.Timing{} = timing}}, socket) do
+    case socket.assigns.ref do
+      ^ref -> {:noreply, stream_insert(socket, :timings, timing)}
+      _ref -> {:noreply, socket}
+    end
   end
 
-  def handle_info({_ref, {:complete, %Browser.Timing{} = timing}}, socket) do
-    {:noreply, stream_insert(socket, :timings, timing)}
+  def handle_info({ref, {:complete, %Browser.Timing{} = timing}}, socket) do
+    case socket.assigns.ref do
+      ^ref -> {:noreply, stream_insert(socket, :timings, timing)}
+      _ref -> {:noreply, socket}
+    end
   end
 
-  def handle_info({_ref, {:error, {_, %Browser.Timing{} = timing}}}, socket) do
-    {:noreply,
-     socket
-     |> assign(ref: nil)
-     |> stream_insert(:timings, timing)}
+  def handle_info({ref, {:error, {_, %Browser.Timing{} = timing}}}, socket) do
+    case socket.assigns.ref do
+      ^ref -> {:noreply, stream_insert(socket, :timings, timing)}
+      _ref -> {:noreply, socket}
+    end
   end
 
   def validate_url(url) do
-    # Ensure the URL has a protocol; default to "http://" if missing
-    url_with_protocol =
+    url = String.trim(url)
+    # Ensure the URL has a protocol and default to http if missing
+    uri =
       case URI.parse(url) do
-        %URI{scheme: nil} -> "http://" <> url
-        _ -> url
+        %URI{scheme: nil} -> URI.parse("http://#{url}")
+        %URI{} = uri -> uri
       end
-
-    # Parse the URL
-    %URI{} = uri = URI.parse(url_with_protocol)
 
     with true <- uri.scheme in ["http", "https"],
          false <- uri.host in ["localhost", "", nil],
-         # Exclude .local hostnames
-         false <- String.ends_with?(uri.host, ".local"),
+         # Exclude .local/.internal hostnames
+         false <- String.contains?(uri.host, ~w(.internal .local)),
          # ensure not ipv4 or ipv6 address
          {:error, _} <- :inet.parse_address(uri.host),
          # Ensure there's a TLD
-         true <- Regex.match?(~r/\.[a-zA-Z]{2,}$/, uri.host) do
-      # apply rate limites
-      with {:ok, _} <- WPS.RateLimiter.inc(uri.host, @max_req_per_min_per_host),
-           {:ok, _} <- WPS.RateLimiter.inc(:all_hosts, @max_all_req_per_min) do
-        {:ok, uri}
-      else
-        {:error, :rate_limited} -> {:error, :rate_limited}
-      end
+         true <- Regex.match?(~r/\.[a-zA-Z]{2,}$/, uri.host),
+         # apply rate limites
+         {:ok, _} <- WPS.RateLimiter.inc(uri.host, @max_req_per_min_per_host),
+         {:ok, _} <- WPS.RateLimiter.inc(:all_hosts, @max_all_req_per_min) do
+      {:ok, uri}
     else
-      _ -> {:error, :invalid_url}
+      {:error, :rate_limited} ->
+        {:error, :rate_limited}
+
+      _ ->
+        {:error, :invalid_url}
     end
   end
 
   def safe_timed_nav(%Browser.Timing{} = timing, parent, ref) do
     FLAME.call(WPS.BrowserRunner, fn ->
-      timing = %Browser.Timing{timing | status: :loading}
+      timing = Browser.Timing.loading(timing)
       send(parent, {ref, {:loading, timing}})
 
       task =
@@ -328,16 +349,13 @@ defmodule WPSWeb.PageSpeedLive do
                 browser
 
               {:error, reason} ->
-                timing = %Browser.Timing{timing | status: :error}
-                send(parent, {ref, {:error, {reason, timing}}})
+                send(parent, {ref, {:error, {reason, Browser.Timing.error(timing)}}})
                 raise "Failed to start browser #{inspect(reason)}"
             end
 
           %Task{ref: task_ref} =
             browser_task =
-            Task.Supervisor.async(WPS.TaskSup, fn ->
-              Browser.time_navigation(browser, timing)
-            end)
+            Task.Supervisor.async(WPS.TaskSup, fn -> Browser.time_navigation(browser, timing) end)
 
           Process.send_after(self(), :timeout, @browser_timeout)
 
@@ -346,8 +364,7 @@ defmodule WPSWeb.PageSpeedLive do
               Task.shutdown(browser_task)
 
             {:EXIT, _pid, reason} ->
-              timing = %Browser.Timing{timing | status: :error}
-              send(parent, {ref, {:error, {reason, timing}}})
+              send(parent, {ref, {:error, {reason, Browser.Timing.error(timing)}}})
               :ok
 
             {:DOWN, ^task_ref, :process, _, _reason} ->
@@ -368,13 +385,21 @@ defmodule WPSWeb.PageSpeedLive do
 
       case Task.yield(task, @browser_timeout) || Task.shutdown(task) do
         {:ok, _} -> :ok
-        nil -> {:error, :timeout}
+        _ -> {:error, :timeout}
       end
     end)
   end
 
   defp status_text(%Browser.Timing{status: :loading}), do: "Loading page"
   defp status_text(%Browser.Timing{status: :awaiting_session}), do: "Starting browser"
-  defp status_text(%Browser.Timing{status: :error}), do: "Uknown error"
-  defp status_text(%Browser.Timing{status: :complete}), do: "Complete"
+  defp status_text(%Browser.Timing{status: :error}), do: "Failed to load page"
+  defp status_text(%Browser.Timing{status: :complete, http_status: stat}), do: "#{stat} Complete"
+
+  defp transfered_size(%Browser.Timing{transfered_bytes: bytes}) do
+    kb = trunc(bytes / 1024)
+    cond do
+      kb < 1024 -> "#{kb} kb"
+      kb >= 1024 -> "#{Float.round(kb / 1024, 2)} mb"
+    end
+  end
 end

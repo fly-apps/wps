@@ -5,20 +5,38 @@ defmodule WPS.Browser do
   defstruct session: nil
 
   defmodule Timing do
-    defstruct url: nil, status: nil, region: nil, loaded: 0, meta: %{}
+    defstruct url: nil,
+              status: nil,
+              transfered_bytes: 0,
+              region: nil,
+              loaded: 0,
+              meta: %{},
+              http_status: nil,
+              browser_url: nil
 
     def build(url, region) do
-      %__MODULE__{url: url, status: :awaiting_session, region: region}
+      %__MODULE__{url: url, browser_url: url, status: :awaiting_session, region: region}
+    end
+
+    def loading(%__MODULE__{} = timing) do
+      %__MODULE__{timing | status: :loading}
+    end
+
+    def error(%__MODULE__{} = timing) do
+      %__MODULE__{timing | status: :error}
+    end
+
+    def complete(%__MODULE__{} = timing) do
+      %__MODULE__{timing | status: :complete}
     end
 
     def dom_interactive_time(%__MODULE__{} = timing) do
-      case timing.meta do
-        %{"domInteractive" => domint, "navigationStart" => start}
-        when is_integer(domint) and is_integer(start) ->
-          domint - start
-
-        _ ->
-          nil
+      with :complete <- timing.status,
+           %{"domInteractive" => domint, "navigationStart" => start}
+           when is_integer(domint) and is_integer(start) <- timing.meta do
+        domint - start
+      else
+        _ -> nil
       end
     end
   end
@@ -38,6 +56,7 @@ defmodule WPS.Browser do
           "--enable-logging",
           "--v=1",
           "--headless",
+          "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.6312.86 Safari/537.36",
           "--disable-dev-shm-usage",
           "--disable-extensions",
           "--disable-default-apps",
@@ -94,7 +113,7 @@ defmodule WPS.Browser do
   end
 
   @perf_timing_poll_interval 100
-  @perf_timing_timeout 15_000
+  @perf_timing_timeout 30_000
   defp await_response_end(browser, timing, tries) do
     if tries * @perf_timing_poll_interval > @perf_timing_timeout do
       stop_session(browser)
@@ -109,11 +128,16 @@ defmodule WPS.Browser do
           await_response_end(browser, timing, tries + 1)
 
         %{"loadEventEnd" => ending, "navigationStart" => start} = all ->
+          {status, http_status, transfered_bytes, browser_url} = fetch_status_from_logs(browser)
+
           timing = %Timing{
             timing
-            | status: :complete,
+            | status: status,
+              transfered_bytes: transfered_bytes,
               loaded: ending - start,
               meta: all,
+              http_status: http_status,
+              browser_url: browser_url,
               region: WPS.region()
           }
 
@@ -141,6 +165,63 @@ defmodule WPS.Browser do
 
       %Req.Response{status: status, body: body} ->
         {:error, {status, body["value"]["message"]}}
+    end
+  end
+
+  def fetch_status_from_logs(%Browser{session: session}) do
+    {:ok, url} = WebDriverClient.fetch_current_url(session)
+    await_req_sent(session, url)
+  end
+
+  defp await_req_sent(session, url) do
+    {:ok, encoded_logs} = WebDriverClient.fetch_logs(session, "performance")
+
+    logs =
+      for entry <- encoded_logs, %WebDriverClient.LogEntry{message: json} = entry do
+        Jason.decode!(json)["message"]
+      end
+
+    req_id =
+      Enum.find_value(logs, fn
+        %{"method" => "Network.requestWillBeSent", "params" => %{"documentURL" => ^url} = params} ->
+          Map.fetch!(params, "requestId")
+
+        %{} ->
+          nil
+      end)
+
+
+    first_resp =
+      Enum.find_value(logs, fn
+        %{"method" => "Network.responseReceived", "params" => %{"response" => resp} = params} ->
+          if params["requestId"] == req_id && resp["url"] == url do
+            params
+          end
+
+        %{} ->
+          nil
+      end)
+
+    transfered_bytes =
+      logs
+      |> Enum.flat_map(fn
+        %{"method" => method, "params" => params} when method in ~w(Network.dataReceived) ->
+          case params do
+            %{"encodedDataLength" => len} when len > 0 -> [len]
+            %{"dataLength" => len} -> [len]
+            %{} -> []
+          end
+
+        %{} ->
+          []
+      end)
+      |> Enum.sum()
+
+    if first_resp do
+      %{"status" => status, "url" => url} = first_resp["response"]
+      {:complete, status, transfered_bytes, url}
+    else
+      {:error, nil, transfered_bytes, url}
     end
   end
 end
