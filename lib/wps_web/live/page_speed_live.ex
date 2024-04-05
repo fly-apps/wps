@@ -126,10 +126,7 @@ defmodule WPSWeb.PageSpeedLive do
                   >
                     <circle cx="1" cy="1" r="1" />
                   </svg>
-                  <p
-                    :if={timing.transfered_bytes > 0}
-                    class="whitespace-nowrap"
-                  >
+                  <p :if={timing.transfered_bytes > 0} class="whitespace-nowrap">
                     <%= transfered_size(timing) %>
                   </p>
                 </div>
@@ -338,54 +335,15 @@ defmodule WPSWeb.PageSpeedLive do
       timing = Browser.Timing.loading(timing)
       send(parent, {ref, {:loading, timing}})
 
-      task =
-        Task.Supervisor.async(WPS.TaskSup, fn ->
-          Process.flag(:trap_exit, true)
-          Process.monitor(parent)
+      case Browser.time_navigation(timing, @browser_timeout) do
+        {:ok, %Browser.Timing{} = timing} ->
+          send(parent, {ref, {:complete, timing}})
 
-          browser =
-            case Browser.start_session() do
-              {:ok, browser} ->
-                browser
+        {:error, {reason, %Browser.Timing{} = timing}} ->
+          send(parent, {ref, {:error, {reason, timing}}})
 
-              {:error, reason} ->
-                send(parent, {ref, {:error, {reason, Browser.Timing.error(timing)}}})
-                raise "Failed to start browser #{inspect(reason)}"
-            end
-
-          %Task{ref: task_ref} =
-            browser_task =
-            Task.Supervisor.async(WPS.TaskSup, fn -> Browser.time_navigation(browser, timing) end)
-
-          Process.send_after(self(), :timeout, @browser_timeout)
-
-          receive do
-            :timeout ->
-              Task.shutdown(browser_task)
-
-            {:EXIT, _pid, reason} ->
-              send(parent, {ref, {:error, {reason, Browser.Timing.error(timing)}}})
-              :ok
-
-            {:DOWN, ^task_ref, :process, _, _reason} ->
-              :ok
-
-            {:DOWN, _, :process, ^parent, _reason} ->
-              Task.shutdown(browser_task)
-
-            {^task_ref, {:ok, %Browser.Timing{} = timing}} ->
-              send(parent, {ref, {:complete, timing}})
-
-            {^task_ref, {:error, {reason, %Browser.Timing{} = timing}}} ->
-              send(parent, {ref, {:error, {reason, timing}}})
-          end
-
-          Browser.stop_session(browser)
-        end)
-
-      case Task.yield(task, @browser_timeout) || Task.shutdown(task) do
-        {:ok, _} -> :ok
-        _ -> {:error, :timeout}
+        {:error, reason} ->
+          send(parent, {ref, {:error, {reason, Browser.Timing.error(timing)}}})
       end
     end)
   end
@@ -397,6 +355,7 @@ defmodule WPSWeb.PageSpeedLive do
 
   defp transfered_size(%Browser.Timing{transfered_bytes: bytes}) do
     kb = trunc(bytes / 1024)
+
     cond do
       kb < 1024 -> "#{kb} kb"
       kb >= 1024 -> "#{Float.round(kb / 1024, 2)} mb"

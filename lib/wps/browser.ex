@@ -81,7 +81,46 @@ defmodule WPS.Browser do
         http_client_options: [recv_timeout: 60_000, timeout: 60_000]
       )
 
-    start_session_with_retries(config, 0)
+    case start_session_with_retries(config, 0) do
+      {:ok, %Browser{} = browser} -> {:ok, browser}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def with_session(base_url \\ "http://127.0.0.1:9515", timeout, func)
+      when is_function(func, 1) do
+    parent = self()
+
+    task =
+      Task.Supervisor.async(WPS.TaskSup, fn ->
+        Process.flag(:trap_exit, true)
+        Process.monitor(parent)
+
+        case start_session(base_url) do
+          {:ok, browser} ->
+            try do
+              %Task{ref: task_ref} = Task.Supervisor.async(WPS.TaskSup, fn -> func.(browser) end)
+              Process.send_after(self(), :timeout, timeout)
+
+              receive do
+                :timeout -> {:error, :timeout}
+                {:EXIT, _pid, reason} -> {:error, {:exit, reason}}
+                {:DOWN, _, :process, ^parent, reason} -> {:error, {:exit, reason}}
+                {^task_ref, result} -> result
+              end
+            after
+              end_session(browser)
+            end
+
+          {:error, reason} ->
+            {:error, {:badsession, reason}}
+        end
+      end)
+
+    case Task.yield(task, timeout) || Task.shutdown(task) do
+      {:ok, result} -> result
+      _other -> {:error, :timeout}
+    end
   end
 
   defp start_session_with_retries(config, retries) do
@@ -106,7 +145,15 @@ defmodule WPS.Browser do
     WebDriverClient.navigate_to(session, url)
   end
 
-  def time_navigation(%Browser{session: session} = browser, %Timing{} = timing) do
+  def time_navigation(%Timing{} = timing, timeout) do
+    case with_session(timeout, fn browser -> do_time_navigation(browser, timing) end) do
+      {:ok, %Timing{} = timing} -> {:ok, timing}
+      {:error, {reason, %Timing{} = timing}} -> {:error, {reason, timing}}
+      {:error, reason} -> {:error, {reason, Timing.error(timing)}}
+    end
+  end
+
+  defp do_time_navigation(%Browser{session: session} = browser, timing) do
     WebDriverClient.navigate_to(session, timing.url)
     timing = %Timing{timing | status: :loading}
     await_response_end(browser, timing, 0)
@@ -114,39 +161,41 @@ defmodule WPS.Browser do
 
   @perf_timing_poll_interval 100
   @perf_timing_timeout 30_000
+  defp await_response_end(browser, timing, tries)
+       when tries * @perf_timing_poll_interval > @perf_timing_timeout do
+    end_session(browser)
+    timing = %Timing{timing | status: :error}
+    {:error, {:timeout, timing}}
+  end
+
   defp await_response_end(browser, timing, tries) do
-    if tries * @perf_timing_poll_interval > @perf_timing_timeout do
-      stop_session(browser)
-      timing = %Timing{timing | status: :error}
-      {:error, {:timeout, timing}}
-    else
-      {:ok, js_timing} = exec_script(browser, "return performance.timing")
+    case exec_script(browser, "return performance.timing") do
+      {:ok, %{"loadEventEnd" => 0, "navigationStart" => _}} ->
+        Process.sleep(@perf_timing_poll_interval)
+        await_response_end(browser, timing, tries + 1)
 
-      case js_timing do
-        %{"loadEventEnd" => 0, "navigationStart" => _} ->
-          Process.sleep(@perf_timing_poll_interval)
-          await_response_end(browser, timing, tries + 1)
+      {:ok, %{"loadEventEnd" => ending, "navigationStart" => start} = all} ->
+        {status, http_status, transfered_bytes, browser_url} = fetch_status_from_logs(browser)
 
-        %{"loadEventEnd" => ending, "navigationStart" => start} = all ->
-          {status, http_status, transfered_bytes, browser_url} = fetch_status_from_logs(browser)
+        timing = %Timing{
+          timing
+          | status: status,
+            transfered_bytes: transfered_bytes,
+            loaded: ending - start,
+            meta: all,
+            http_status: http_status,
+            browser_url: browser_url,
+            region: WPS.region()
+        }
 
-          timing = %Timing{
-            timing
-            | status: status,
-              transfered_bytes: transfered_bytes,
-              loaded: ending - start,
-              meta: all,
-              http_status: http_status,
-              browser_url: browser_url,
-              region: WPS.region()
-          }
+        {:ok, timing}
 
-          {:ok, timing}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
-  def stop_session(%Browser{session: session}) do
+  def end_session(%Browser{session: session}) do
     WebDriverClient.end_session(session)
   end
 
@@ -189,7 +238,6 @@ defmodule WPS.Browser do
         %{} ->
           nil
       end)
-
 
     first_resp =
       Enum.find_value(logs, fn
