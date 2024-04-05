@@ -92,16 +92,16 @@ defmodule WPSWeb.PageSpeedLive do
                     <div class="h-3 w-3 rounded-full bg-current"></div>
                   </div>
                   <h2 class="min-w-0 text-md font-semibold leading-6 text-white">
-                    <a href="#" class="flex gap-x-2">
+                    <span class="flex gap-x-2">
                       <span class="truncate"><%= region_text(timing.region) %></span>
-                      <span class="text-gray-400">
+                      <span class="text-gray-400 hidden md:block">
                         <.icon name="hero-paper-airplane" class="w-5 h-5" />
                       </span>
-                      <span class="whitespace-nowrap font-normal text-gray-300">
+                      <span class="whitespace-nowrap font-normal text-gray-300 hidden md:block">
                         <%= URI.parse(timing.browser_url).host %>
                       </span>
                       <span class="absolute inset-0"></span>
-                    </a>
+                    </span>
                   </h2>
                 </div>
                 <div class="mt-3 flex items-center gap-x-2.5 text-xs leading-5 text-gray-400">
@@ -131,17 +131,19 @@ defmodule WPSWeb.PageSpeedLive do
                   </p>
                 </div>
               </div>
-              <div
-                :if={timing.status == :complete}
-                class="rounded-full flex-none py-1 px-2 text-md font-medium ring-1 ring-inset text-indigo-400 bg-indigo-400/10 ring-indigo-400/30"
-              >
-                <img
-                  :if={src = badge_src(timing.region)}
-                  class="relative inline mr-1 -top-0.5 left-0 w-5 h-5"
-                  src={src}
-                  title={region_text(timing.region)}
-                />
-                <%= timing.loaded %>ms
+              <div class="min-w-[100px]">
+                <span
+                  :if={timing.status == :complete}
+                  class="rounded-full flex-none py-2 px-2 text-md font-medium ring-1 ring-inset text-indigo-400 bg-indigo-400/10 ring-indigo-400/30"
+                >
+                  <img
+                    :if={src = badge_src(timing.region)}
+                    class="relative inline mr-1 -top-0.5 left-0 w-5 h-5"
+                    src={src}
+                    title={region_text(timing.region)}
+                  />
+                  <%= timing.loaded %>ms
+                </span>
               </div>
             </li>
           </ul>
@@ -185,8 +187,7 @@ defmodule WPSWeb.PageSpeedLive do
       |> assign(ref: nil, uri: URI.parse(default_url), form: to_form(%{"url" => default_url}))
       |> stream_configure(:timings, dom_id: &"timing-#{&1.region}")
       |> stream(:timings, [])
-
-    #  |> simulate_results("https://phoenixframework.org")
+      # |> simulate_results("https://phoenixframework.org")
 
     {:ok, socket}
   end
@@ -198,6 +199,7 @@ defmodule WPSWeb.PageSpeedLive do
       %Browser.Timing{
         status: :complete,
         url: url,
+        browser_url: url,
         loaded: 2500,
         meta: %{},
         region: "iad"
@@ -205,11 +207,19 @@ defmodule WPSWeb.PageSpeedLive do
       %Browser.Timing{
         status: :loading,
         url: url,
+        browser_url: url,
         loaded: 0,
         meta: %{},
         region: "syd"
       },
-      %Browser.Timing{status: :error, url: url, loaded: 0, meta: %{}, region: "arn"}
+      %Browser.Timing{
+        status: :error,
+        url: url,
+        browser_url: url,
+        loaded: 0,
+        meta: %{},
+        region: "arn"
+      }
     ]
 
     socket

@@ -10,14 +10,14 @@ defmodule WPS.Application do
     children =
       children(
         always: WPSWeb.Telemetry,
-        always: WPS.Repo,
         parent: {DNSCluster, query: Application.get_env(:wps, :dns_cluster_query) || :ignore},
+        always: {Task.Supervisor, name: WPS.TaskSup},
         parent: {Phoenix.PubSub, name: WPS.PubSub},
         parent: {WPS.Tracker, name: WPS.Tracker, pubsub_server: WPS.PubSub},
         parent: WPS.Members,
         parent: WPS.RateLimiter,
-        parent: WPS.Browser.HeadlessDriver,
-        always:
+        flame: WPS.Browser.HeadlessDriver,
+        parent:
           {FLAME.Pool,
            name: WPS.BrowserRunner,
            min: 0,
@@ -36,14 +36,15 @@ defmodule WPS.Application do
   end
 
   defp children(child_specs) do
-    is_parent? = !!(FLAME.Parent.get() || FLAME.Backend.impl() == FLAME.LocalBackend)
+    is_parent? = is_nil(FLAME.Parent.get())
+    is_flame? = !is_parent? || FLAME.Backend.impl() == FLAME.LocalBackend
 
     Enum.flat_map(child_specs, fn
       {:always, spec} -> [spec]
       {:parent, spec} when is_parent? == true -> [spec]
       {:parent, _spec} when is_parent? == false -> []
-      {:flame, _spec} when is_parent? == true -> []
-      {:flame, spec} when is_parent? == false -> [spec]
+      {:flame, spec} when is_flame? == true -> [spec]
+      {:flame, _spec} when is_flame? == false -> []
     end)
   end
 
